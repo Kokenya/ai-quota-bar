@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai-quota-bar"
+version = "0.2.0"
+description = "Real-time AI Coding CLI quota & rate limit monitor in Linux GNOME top bar (Claude Code, Antigravity, OpenAI Codex, GitHub Copilot)"
+readme = "README.md"
+authors = [{ name = "András Kökény", email = "k.andris99@gmail.com" }]
+license = { text = "MIT" }
+requires-python = ">=3.9"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Environment :: X11 Applications :: Gnome",
+    "Topic :: System :: Monitoring",
+    "Topic :: Utilities",
+]
+dependencies = [
+    "dbus-python",
+    "PyGObject",
+]
+
+[project.scripts]
+ai-usage = "ai_quota_bar.cli:main"
+ai-quota-bar = "ai_quota_bar.indicator:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

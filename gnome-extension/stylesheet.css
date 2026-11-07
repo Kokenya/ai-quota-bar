@@ -1,0 +1,18 @@
+.ai-quota-box {
+    spacing: 6px;
+}
+
+.ai-quota-label {
+    font-size: 11pt;
+    font-weight: 600;
+}
+
+.ai-quota-menu-header {
+    font-weight: bold;
+    font-size: 12pt;
+}
+
+.ai-quota-section-title {
+    font-weight: bold;
+    color: #8ab4f8;
+}

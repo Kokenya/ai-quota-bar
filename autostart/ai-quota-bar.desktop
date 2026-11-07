@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=AI Quota Bar
+Comment=Real-time AI Coding CLI quota & rate limit monitor in top bar
+Exec=/usr/bin/python3 /home/relkokeny/.local/bin/ai-quota-bar
+Icon=utilities-system-monitor
+Terminal=false
+Categories=Utility;Development;System;
+StartupNotify=false
+X-GNOME-Autostart-enabled=true

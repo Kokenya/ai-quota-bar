@@ -1,0 +1,7 @@
+{
+  "name": "AI Quota Bar",
+  "description": "Displays real-time remaining 5-hour, weekly, and monthly quotas for Claude Code, Antigravity, OpenAI Codex, and GitHub Copilot in the top bar.",
+  "uuid": "ai-quota-bar@kokenya",
+  "shell-version": ["45", "46", "47", "48", "49", "50", "50.1"],
+  "version": 2
+}
