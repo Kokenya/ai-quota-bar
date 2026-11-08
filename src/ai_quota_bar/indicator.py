@@ -150,8 +150,9 @@ def format_relative_time(iso_str):
         return ""
 
 class DBusMenu(dbus.service.Object):
-    def __init__(self, bus, on_refresh=None, on_quit=None, on_open_config=None):
+    def __init__(self, bus, provider_id=None, on_refresh=None, on_quit=None, on_open_config=None):
         super().__init__(bus, "/MenuBar")
+        self.provider_id = provider_id
         self.revision = 1
         self.on_refresh = on_refresh
         self.on_quit = on_quit
@@ -208,18 +209,40 @@ class DBusMenu(dbus.service.Object):
             )
             new_items.append(struct)
 
-        add_item("── AI Quota & Usage Monitor ──", enabled=False, icon_name="ai-quota-bar")
-        add_separator()
-
         providers_raw = data.get("providers", {})
-        for pid, pdata in providers_raw.items():
+
+        # If this menu belongs to a specific provider, filter only that one!
+        if self.provider_id:
+            pdata = providers_raw.get(self.provider_id)
+            if pdata:
+                filtered_providers = {self.provider_id: pdata}
+                p_obj = deserialize_provider(pdata)
+                plan_suffix = f" ({p_obj.plan_name})" if p_obj.plan_name else ""
+                title_text = f"── {p_obj.display_name}{plan_suffix} ──"
+            else:
+                filtered_providers = {}
+                title_text = f"── {self.provider_id.capitalize()} ──"
+            add_item(title_text, enabled=False, icon_name=self.provider_id)
+            add_separator()
+            if not filtered_providers:
+                add_item("   Nincs adat", enabled=False)
+                add_separator()
+        else:
+            filtered_providers = providers_raw
+            add_item("── AI Quota & Usage Monitor ──", enabled=False, icon_name="ai-quota-bar")
+            add_separator()
+
+        for pid, pdata in filtered_providers.items():
+            if not pdata:
+                continue
             p = deserialize_provider(pdata)
 
-            # Header with clean name and logo icon - NO EMOJIS!
-            header = p.display_name
-            if p.plan_name:
-                header += f" ({p.plan_name})"
-            add_item(header, enabled=False, icon_name=pid)
+            # If showing multiple providers, show header per provider
+            if not self.provider_id:
+                header = p.display_name
+                if p.plan_name:
+                    header += f" ({p.plan_name})"
+                add_item(header, enabled=False, icon_name=pid)
 
             if not p.ok:
                 add_item(f"   ⚠️ {p.error or 'Error'}", enabled=False)
@@ -375,7 +398,7 @@ class ProviderIndicator:
             replace_existing=True,
             do_not_queue=True
         )
-        self.menu = DBusMenu(self.conn, on_refresh=on_refresh, on_quit=on_quit, on_open_config=on_open_config)
+        self.menu = DBusMenu(self.conn, provider_id=self.provider_id, on_refresh=on_refresh, on_quit=on_quit, on_open_config=on_open_config)
         self.item = StatusNotifierItem(self.conn, self.provider_id, self.icon_name)
 
 class App:
