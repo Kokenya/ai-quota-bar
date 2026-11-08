@@ -122,6 +122,16 @@ def collect_usage(force: bool = False) -> Dict[str, Any]:
                     )
                 )
 
+    # Ensure deterministic, logical provider ordering
+    ordered_providers = {}
+    for p in target_provs:
+        if p.provider_id in results["providers"]:
+            ordered_providers[p.provider_id] = results["providers"][p.provider_id]
+    for pid, pdata in results["providers"].items():
+        if pid not in ordered_providers:
+            ordered_providers[pid] = pdata
+    results["providers"] = ordered_providers
+
     # Save to cache
     os.makedirs(os.path.dirname(CACHE_FILE), exist_ok=True)
     tmp_path = CACHE_FILE + ".tmp"

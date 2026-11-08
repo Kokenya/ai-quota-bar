@@ -5,13 +5,15 @@ from gi.repository import GLib
 import json
 import os
 import signal
+import subprocess
 import sys
 import threading
 import time
 from datetime import datetime, timezone
+from typing import Optional
 
 from ai_quota_bar.collector import collect_usage, get_cached_usage, deserialize_provider
-from ai_quota_bar.config import load_config, CACHE_FILE, CONFIG_DIR
+from ai_quota_bar.config import load_config, CACHE_FILE, CONFIG_DIR, CONFIG_FILE
 
 BUS_NAME = "org.kde.StatusNotifierItem-ai-quota-bar"
 PID_FILE = os.path.expanduser("~/.cache/ai-quota-bar/indicator.pid")
@@ -77,6 +79,52 @@ def ensure_single_instance():
     except Exception:
         pass
 
+def get_status_dot(pct: Optional[int]) -> str:
+    if pct is None:
+        return "⚪"
+    if pct >= 50:
+        return "🟢"
+    elif pct >= 20:
+        return "🟡"
+    else:
+        return "🔴"
+
+def render_progress_bar(pct: Optional[int], length: int = 10) -> str:
+    if pct is None:
+        return "[──────────]"
+    pct = max(0, min(100, pct))
+    filled = round((pct / 100) * length)
+    empty = length - filled
+    return f"[{'█' * filled}{'░' * empty}]"
+
+def normalize_window_name(name: str, window_type: str = "") -> str:
+    nl = name.strip().lower()
+    wt = (window_type or "").lower()
+    if "five hour" in nl or "5-hour" in nl or "5h" in nl or wt == "5h":
+        return "5-Hour Limit"
+    if "weekly" in nl or "7-day" in nl or "seven day" in nl or wt == "weekly" or "week" in nl:
+        return "Weekly Limit"
+    if "hourly" in nl or wt == "hourly":
+        return "Hourly Limit"
+    if "monthly" in nl or "plan quota" in nl or wt == "monthly":
+        return "Monthly Limit"
+    if nl.endswith(" remaining"):
+        return name[:-10].strip()
+    return name
+
+def sort_window_key(w):
+    nl = (w.name or "").strip().lower()
+    wt = (w.window_type or "").lower()
+    if wt == "5h" or "five hour" in nl or "5-hour" in nl or "5h" in nl:
+        return 1
+    if wt == "weekly" or "7-day" in nl or "seven day" in nl or "week" in nl:
+        return 2
+    if wt == "hourly" or "hour" in nl:
+        return 3
+    if wt == "monthly" or "month" in nl or "plan" in nl:
+        return 4
+    return 5
+
 def format_relative_time(iso_str):
     if not iso_str:
         return ""
@@ -102,11 +150,12 @@ def format_relative_time(iso_str):
         return ""
 
 class DBusMenu(dbus.service.Object):
-    def __init__(self, bus, on_refresh=None, on_quit=None):
+    def __init__(self, bus, on_refresh=None, on_quit=None, on_open_config=None):
         super().__init__(bus, "/MenuBar")
         self.revision = 1
         self.on_refresh = on_refresh
         self.on_quit = on_quit
+        self.on_open_config = on_open_config
         self.items = []
         self.callbacks = {}
 
@@ -146,39 +195,63 @@ class DBusMenu(dbus.service.Object):
             )
             new_items.append(struct)
 
-        add_item("── AI Quota & Usage Monitor ──", enabled=False)
+        add_item("── 📊 AI Quota & Usage Monitor ──", enabled=False)
         add_separator()
 
         providers_raw = data.get("providers", {})
         for pid, pdata in providers_raw.items():
             p = deserialize_provider(pdata)
-            header = f"{p.icon} {p.display_name}"
+
+            brand_icon = {
+                "claude": "🟣",
+                "antigravity": "🔵",
+                "codex": "🟢",
+                "copilot": "🐙"
+            }.get(pid, p.icon or "💻")
+
+            header = f"{brand_icon} {p.display_name}"
             if p.plan_name:
                 header += f" ({p.plan_name})"
-            header += ":"
             add_item(header, enabled=False)
 
             if not p.ok:
                 add_item(f"   ⚠️ {p.error or 'Error'}", enabled=False)
             else:
-                for w in p.windows:
-                    rem_str = f"{w.remaining_pct}%" if w.remaining_pct is not None else "--"
+                sorted_windows = sorted(p.windows, key=sort_window_key)
+                for w in sorted_windows:
+                    norm_name = normalize_window_name(w.name, w.window_type)
+                    dot = get_status_dot(w.remaining_pct)
+                    pct_val = w.remaining_pct if w.remaining_pct is not None else "--"
+                    pct_str = f"{pct_val:>3}%"
+                    bar = render_progress_bar(w.remaining_pct, length=10)
                     reset_str = format_relative_time(w.resets_at)
-                    add_item(f"   ⏱️ {w.name}: {rem_str} left {reset_str}".strip(), enabled=False)
+                    line = f"   {dot} {norm_name:<13} {pct_str}  {bar}"
+                    if reset_str:
+                        line += f"  {reset_str}"
+                    add_item(line, enabled=False)
 
-                for sg in p.sub_groups:
-                    if sg.group_name == "Gemini Models":
-                        continue
-                    add_item(f"   [{sg.group_name}]", enabled=False)
-                    for w in sg.windows:
-                        rem_str = f"{w.remaining_pct}%" if w.remaining_pct is not None else "--"
-                        reset_str = format_relative_time(w.resets_at)
-                        add_item(f"     • {w.name}: {rem_str} left {reset_str}".strip(), enabled=False)
+                sub_groups = [sg for sg in p.sub_groups if sg.group_name != "Gemini Models"]
+                for i, sg in enumerate(sub_groups):
+                    is_last = (i == len(sub_groups) - 1)
+                    tree_char = "└──" if is_last else "├──"
+                    parts = []
+                    sorted_sg_windows = sorted(sg.windows, key=sort_window_key)
+                    for w in sorted_sg_windows:
+                        dot = get_status_dot(w.remaining_pct)
+                        w_short = "5h" if ("5h" in w.name.lower() or "five" in w.name.lower()) else ("W" if "week" in w.name.lower() else "Limit")
+                        pct_s = f"{w.remaining_pct}%" if w.remaining_pct is not None else "--"
+                        reset_s = format_relative_time(w.resets_at)
+                        part = f"{w_short} {pct_s} {dot}"
+                        if reset_s:
+                            part += f" {reset_s}"
+                        parts.append(part)
+                    sub_line = f"   {tree_char} {sg.group_name}: " + "  •  ".join(parts)
+                    add_item(sub_line, enabled=False)
 
             add_separator()
 
         ts = data.get("timestamp")
-        time_str = "just now"
+        time_str = "most"
         if ts:
             try:
                 if ts.endswith("Z"):
@@ -187,10 +260,13 @@ class DBusMenu(dbus.service.Object):
                 time_str = dt.strftime("%H:%M:%S")
             except Exception:
                 pass
-        add_item(f"🕒 Updated: {time_str}", enabled=False)
+        add_item(f"🕒 Frissítve: {time_str}", enabled=False)
 
         if self.on_refresh:
-            add_item("🔄 Refresh Now", enabled=True, on_click=self.on_refresh)
+            add_item("🔄 Frissítés most (Refresh)", enabled=True, on_click=self.on_refresh)
+
+        if self.on_open_config:
+            add_item("⚙️ Beállítások (Config)", enabled=True, on_click=self.on_open_config)
 
         if self.on_quit:
             add_item("❌ Kilépés (Quit)", enabled=True, on_click=self.on_quit)
@@ -282,7 +358,12 @@ class App:
         self.loop = GLib.MainLoop()
 
         self.cfg = load_config()
-        self.menu = DBusMenu(self.bus, on_refresh=self.trigger_refresh, on_quit=self.quit)
+        self.menu = DBusMenu(
+            self.bus,
+            on_refresh=self.trigger_refresh,
+            on_quit=self.quit,
+            on_open_config=self.open_config
+        )
         self.item = StatusNotifierItem(self.bus)
 
         self._register_with_watcher()
@@ -329,6 +410,12 @@ class App:
             except Exception:
                 pass
 
+    def open_config(self):
+        try:
+            subprocess.Popen(["xdg-open", CONFIG_FILE])
+        except Exception:
+            pass
+
     def build_topbar_label(self, data: dict) -> str:
         parts = []
         providers_raw = data.get("providers", {})
@@ -341,6 +428,27 @@ class App:
 
             tag = "C" if pid == "claude" else ("AG" if pid == "antigravity" else ("CX" if pid == "codex" else ("GH" if pid == "copilot" else pid[:2].upper())))
 
+            # Determine icon/color for provider
+            min_pct = 100
+            has_window = False
+            for w in p.windows:
+                if w.remaining_pct is not None:
+                    has_window = True
+                    min_pct = min(min_pct, w.remaining_pct)
+
+            if has_window and min_pct <= 15:
+                icon = "🔴"
+            elif has_window and min_pct <= 40:
+                icon = "🟡"
+            else:
+                brand_icons = {
+                    "claude": "🟣",
+                    "antigravity": "🔵",
+                    "codex": "🟢",
+                    "copilot": "🐙"
+                }
+                icon = brand_icons.get(pid, p.icon or "🟢")
+
             w5 = p.get_5h_window()
             wW = p.get_weekly_window()
 
@@ -348,14 +456,14 @@ class App:
                 s5 = f"{w5.remaining_pct}%" if w5 and w5.remaining_pct is not None else "--"
                 sW = f"{wW.remaining_pct}%" if wW and wW.remaining_pct is not None else "--"
                 if w5 and wW:
-                    parts.append(f"{tag} {s5}·{sW}")
+                    parts.append(f"{icon} {tag} {s5}·{sW}")
                 elif wW:
-                    parts.append(f"{tag} {sW}")
+                    parts.append(f"{icon} {tag} {sW}")
                 elif w5:
-                    parts.append(f"{tag} {s5}")
+                    parts.append(f"{icon} {tag} {s5}")
                 elif p.windows:
                     first_pct = p.windows[0].remaining_pct
-                    parts.append(f"{tag} {first_pct}%" if first_pct is not None else f"{tag} ok")
+                    parts.append(f"{icon} {tag} {first_pct}%" if first_pct is not None else f"{icon} {tag}")
             else:
                 sub_parts = []
                 if w5 and w5.remaining_pct is not None:
@@ -364,9 +472,9 @@ class App:
                     sub_parts.append(f"W {wW.remaining_pct}%")
 
                 if sub_parts:
-                    parts.append(f"{tag}: {' '.join(sub_parts)}")
+                    parts.append(f"{icon} {tag}: {' '.join(sub_parts)}")
                 elif p.windows and p.windows[0].remaining_pct is not None:
-                    parts.append(f"{tag}: {p.windows[0].remaining_pct}%")
+                    parts.append(f"{icon} {tag}: {p.windows[0].remaining_pct}%")
 
         if not parts:
             return "AI Quota: active"
