@@ -25,3 +25,5 @@ MANIFEST
 htmlcov/
 .cache/
 *.lock
+tmp/
+*.tmp

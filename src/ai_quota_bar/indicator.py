@@ -166,7 +166,7 @@ class DBusMenu(dbus.service.Object):
 
         item_id = 1
 
-        def add_item(label, enabled=True, on_click=None):
+        def add_item(label, enabled=True, on_click=None, icon_name=None):
             nonlocal item_id
             cid = item_id
             item_id += 1
@@ -176,6 +176,8 @@ class DBusMenu(dbus.service.Object):
                 "label": dbus.String(label),
                 "enabled": dbus.Boolean(enabled),
             }
+            if icon_name:
+                props["icon-name"] = dbus.String(icon_name)
             struct = dbus.Struct(
                 (dbus.Int32(cid), dbus.Dictionary(props, signature="sv"), dbus.Array([], signature="v")),
                 signature="(ia{sv}av)",
@@ -195,7 +197,7 @@ class DBusMenu(dbus.service.Object):
             )
             new_items.append(struct)
 
-        add_item("── 📊 AI Quota & Usage Monitor ──", enabled=False)
+        add_item("── 📊 AI Quota & Usage Monitor ──", enabled=False, icon_name="ai-quota-bar")
         add_separator()
 
         providers_raw = data.get("providers", {})
@@ -212,7 +214,7 @@ class DBusMenu(dbus.service.Object):
             header = f"{brand_icon} {p.display_name}"
             if p.plan_name:
                 header += f" ({p.plan_name})"
-            add_item(header, enabled=False)
+            add_item(header, enabled=False, icon_name=f"ai-quota-bar-{pid}")
 
             if not p.ok:
                 add_item(f"   ⚠️ {p.error or 'Error'}", enabled=False)
@@ -306,7 +308,7 @@ class StatusNotifierItem(dbus.service.Object):
     def __init__(self, bus):
         super().__init__(bus, "/StatusNotifierItem")
         self.label = "AI Quota..."
-        self.icon_name = "utilities-system-monitor-symbolic"
+        self.icon_name = "ai-quota-bar"
 
     def set_label(self, label):
         self.label = label
@@ -326,7 +328,7 @@ class StatusNotifierItem(dbus.service.Object):
                 "Title": dbus.String("AI Quota Bar"),
                 "Status": dbus.String("Active"),
                 "IconName": dbus.String(self.icon_name),
-                "IconThemePath": dbus.String(""),
+                "IconThemePath": dbus.String(os.path.expanduser("~/.local/share/icons/hicolor")),
                 "Menu": dbus.ObjectPath("/MenuBar"),
                 "XAyatanaLabel": dbus.String(self.label),
                 "XAyatanaLabelGuide": dbus.String("C: 5h 100% W 100% | AG: 5h 100% W 100%"),

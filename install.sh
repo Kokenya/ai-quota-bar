@@ -55,7 +55,28 @@ systemctl --user restart ai-quota-bar.service
 # 5. Install autostart entry
 cp "$SCRIPT_DIR/autostart/ai-quota-bar.desktop" "$AUTOSTART_DIR/ai-quota-bar.desktop"
 
-# 6. Remove any conflicting legacy GNOME shell extensions
+# 6. Install application and provider icons
+mkdir -p "$HOME/.local/share/icons/hicolor/scalable/apps"
+if [ -d "$SCRIPT_DIR/assets/icons" ]; then
+    cp "$SCRIPT_DIR/assets/icons"/*.svg "$HOME/.local/share/icons/hicolor/scalable/apps/" 2>/dev/null || true
+    for f in claude antigravity codex copilot githubcopilot ai-quota-bar; do
+        cp "$SCRIPT_DIR/assets/icons/${f}.svg" "$HOME/.local/share/icons/hicolor/scalable/apps/ai-quota-bar-${f}.svg" 2>/dev/null || true
+    done
+    if [ -d "$SCRIPT_DIR/assets/icons/png" ]; then
+        for sz in 16 22 24 32 48 64 128 256; do
+            if [ -d "$SCRIPT_DIR/assets/icons/png/${sz}x${sz}" ]; then
+                mkdir -p "$HOME/.local/share/icons/hicolor/${sz}x${sz}/apps"
+                cp "$SCRIPT_DIR/assets/icons/png/${sz}x${sz}"/*.png "$HOME/.local/share/icons/hicolor/${sz}x${sz}/apps/" 2>/dev/null || true
+                for f in claude antigravity codex copilot githubcopilot ai-quota-bar; do
+                    cp "$SCRIPT_DIR/assets/icons/png/${sz}x${sz}/${f}.png" "$HOME/.local/share/icons/hicolor/${sz}x${sz}/apps/ai-quota-bar-${f}.png" 2>/dev/null || true
+                done
+            fi
+        done
+    fi
+    gtk-update-icon-cache "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
+fi
+
+# 7. Remove any conflicting legacy GNOME shell extensions
 gnome-extensions uninstall ai-quota-bar@kokenya 2>/dev/null || true
 gnome-extensions uninstall ai-usage-monitor@relkokeny 2>/dev/null || true
 rm -rf "$HOME/.local/share/gnome-shell/extensions/ai-quota-bar@kokenya"
