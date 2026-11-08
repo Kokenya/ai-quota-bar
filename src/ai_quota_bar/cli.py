@@ -121,7 +121,7 @@ def render_cli(data, use_colors=True):
     for pid, pdata in providers_raw.items():
         p = deserialize_provider(pdata)
         color = c_purple if pid == "claude" else (c_blue if pid == "antigravity" else (c_green if pid == "codex" else c_cyan))
-        name_str = f"{p.icon} {p.display_name}"
+        name_str = p.display_name
         if p.plan_name:
             name_str += f" ({p.plan_name})"
 

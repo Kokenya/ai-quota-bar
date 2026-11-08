@@ -157,11 +157,13 @@ class DBusMenu(dbus.service.Object):
         self.on_quit = on_quit
         self.on_open_config = on_open_config
         self.items = []
+        self.item_props = {}
         self.callbacks = {}
 
     def update_menu(self, data):
         self.revision += 1
         self.callbacks.clear()
+        self.item_props.clear()
         new_items = []
 
         item_id = 1
@@ -178,6 +180,14 @@ class DBusMenu(dbus.service.Object):
             }
             if icon_name:
                 props["icon-name"] = dbus.String(icon_name)
+                png_path = os.path.expanduser(f"~/.local/share/icons/hicolor/24x24/apps/{icon_name}.png")
+                if os.path.exists(png_path):
+                    try:
+                        with open(png_path, "rb") as f:
+                            props["icon-data"] = dbus.ByteArray(f.read())
+                    except Exception:
+                        pass
+            self.item_props[cid] = props
             struct = dbus.Struct(
                 (dbus.Int32(cid), dbus.Dictionary(props, signature="sv"), dbus.Array([], signature="v")),
                 signature="(ia{sv}av)",
@@ -190,6 +200,7 @@ class DBusMenu(dbus.service.Object):
             cid = item_id
             item_id += 1
             props = {"type": dbus.String("separator")}
+            self.item_props[cid] = props
             struct = dbus.Struct(
                 (dbus.Int32(cid), dbus.Dictionary(props, signature="sv"), dbus.Array([], signature="v")),
                 signature="(ia{sv}av)",
@@ -197,24 +208,18 @@ class DBusMenu(dbus.service.Object):
             )
             new_items.append(struct)
 
-        add_item("── 📊 AI Quota & Usage Monitor ──", enabled=False, icon_name="ai-quota-bar")
+        add_item("── AI Quota & Usage Monitor ──", enabled=False, icon_name="ai-quota-bar")
         add_separator()
 
         providers_raw = data.get("providers", {})
         for pid, pdata in providers_raw.items():
             p = deserialize_provider(pdata)
 
-            brand_icon = {
-                "claude": "🟣",
-                "antigravity": "🔵",
-                "codex": "🟢",
-                "copilot": "🐙"
-            }.get(pid, p.icon or "💻")
-
-            header = f"{brand_icon} {p.display_name}"
+            # Header with clean name and logo icon - NO EMOJIS!
+            header = p.display_name
             if p.plan_name:
                 header += f" ({p.plan_name})"
-            add_item(header, enabled=False, icon_name=f"ai-quota-bar-{pid}")
+            add_item(header, enabled=False, icon_name=pid)
 
             if not p.ok:
                 add_item(f"   ⚠️ {p.error or 'Error'}", enabled=False)
@@ -222,12 +227,11 @@ class DBusMenu(dbus.service.Object):
                 sorted_windows = sorted(p.windows, key=sort_window_key)
                 for w in sorted_windows:
                     norm_name = normalize_window_name(w.name, w.window_type)
-                    dot = get_status_dot(w.remaining_pct)
                     pct_val = w.remaining_pct if w.remaining_pct is not None else "--"
                     pct_str = f"{pct_val:>3}%"
                     bar = render_progress_bar(w.remaining_pct, length=10)
                     reset_str = format_relative_time(w.resets_at)
-                    line = f"   {dot} {norm_name:<13} {pct_str}  {bar}"
+                    line = f"   {norm_name:<13} {pct_str}  {bar}"
                     if reset_str:
                         line += f"  {reset_str}"
                     add_item(line, enabled=False)
@@ -239,11 +243,10 @@ class DBusMenu(dbus.service.Object):
                     parts = []
                     sorted_sg_windows = sorted(sg.windows, key=sort_window_key)
                     for w in sorted_sg_windows:
-                        dot = get_status_dot(w.remaining_pct)
                         w_short = "5h" if ("5h" in w.name.lower() or "five" in w.name.lower()) else ("W" if "week" in w.name.lower() else "Limit")
                         pct_s = f"{w.remaining_pct}%" if w.remaining_pct is not None else "--"
                         reset_s = format_relative_time(w.resets_at)
-                        part = f"{w_short} {pct_s} {dot}"
+                        part = f"{w_short} {pct_s}"
                         if reset_s:
                             part += f" {reset_s}"
                         parts.append(part)
@@ -289,10 +292,18 @@ class DBusMenu(dbus.service.Object):
 
     @dbus.service.method("com.canonical.dbusmenu", in_signature="aias", out_signature="a(ia{sv})")
     def GetGroupProperties(self, ids, propertyNames):
-        return dbus.Array([], signature="(ia{sv})")
+        result = []
+        target_ids = ids if ids else list(self.item_props.keys())
+        for cid in target_ids:
+            if cid in self.item_props:
+                dict_props = dbus.Dictionary(self.item_props[cid], signature="sv")
+                result.append(dbus.Struct((dbus.Int32(cid), dict_props), signature="(ia{sv})"))
+        return dbus.Array(result, signature="(ia{sv})")
 
     @dbus.service.method("com.canonical.dbusmenu", in_signature="is", out_signature="v")
     def GetProperty(self, item_id, name):
+        if item_id in self.item_props and name in self.item_props[item_id]:
+            return self.item_props[item_id][name]
         return dbus.String("", variant_level=1)
 
     @dbus.service.method("com.canonical.dbusmenu", in_signature="isvu")
@@ -305,10 +316,12 @@ class DBusMenu(dbus.service.Object):
         return False
 
 class StatusNotifierItem(dbus.service.Object):
-    def __init__(self, bus):
-        super().__init__(bus, "/StatusNotifierItem")
-        self.label = "AI Quota..."
-        self.icon_name = "ai-quota-bar"
+    def __init__(self, conn, provider_id, icon_name):
+        super().__init__(conn, "/StatusNotifierItem")
+        self.provider_id = provider_id
+        self.icon_name = icon_name
+        self.label = ""
+        self.icon_theme_path = os.path.expanduser("~/.local/share/icons")
 
     def set_label(self, label):
         self.label = label
@@ -324,14 +337,14 @@ class StatusNotifierItem(dbus.service.Object):
         if interface == "org.kde.StatusNotifierItem":
             return {
                 "Category": dbus.String("ApplicationStatus"),
-                "Id": dbus.String("ai-quota-bar"),
-                "Title": dbus.String("AI Quota Bar"),
+                "Id": dbus.String(f"ai-quota-{self.provider_id}"),
+                "Title": dbus.String(f"AI Quota ({self.provider_id})"),
                 "Status": dbus.String("Active"),
                 "IconName": dbus.String(self.icon_name),
-                "IconThemePath": dbus.String(os.path.expanduser("~/.local/share/icons/hicolor")),
+                "IconThemePath": dbus.String(self.icon_theme_path),
                 "Menu": dbus.ObjectPath("/MenuBar"),
                 "XAyatanaLabel": dbus.String(self.label),
-                "XAyatanaLabelGuide": dbus.String("C: 5h 100% W 100% | AG: 5h 100% W 100%"),
+                "XAyatanaLabelGuide": dbus.String("5h 100% W 100%"),
                 "XAyatanaOrderingIndex": dbus.UInt32(0),
             }
         return {}
@@ -344,54 +357,66 @@ class StatusNotifierItem(dbus.service.Object):
     def NewStatus(self, status):
         pass
 
-class App:
-    def __init__(self):
-        # 1. Kill any existing instances before registering
-        ensure_single_instance()
+    def quit(self):
+        try:
+            self.NewStatus("Passive")
+        except Exception:
+            pass
 
-        dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
-        self.bus = dbus.SessionBus()
+class ProviderIndicator:
+    def __init__(self, provider_id, icon_name, on_refresh, on_quit, on_open_config):
+        self.provider_id = provider_id
+        self.icon_name = icon_name
+        self.bus_name_str = f"org.kde.StatusNotifierItem-ai-quota-{provider_id}"
+        self.conn = dbus.bus.BusConnection(dbus.Bus.TYPE_SESSION)
         self.bus_name = dbus.service.BusName(
-            BUS_NAME,
-            self.bus,
+            self.bus_name_str,
+            self.conn,
             replace_existing=True,
             do_not_queue=True
         )
-        self.loop = GLib.MainLoop()
+        self.menu = DBusMenu(self.conn, on_refresh=on_refresh, on_quit=on_quit, on_open_config=on_open_config)
+        self.item = StatusNotifierItem(self.conn, self.provider_id, self.icon_name)
 
+class App:
+    def __init__(self):
+        ensure_single_instance()
+
+        dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+        self.loop = GLib.MainLoop()
         self.cfg = load_config()
-        self.menu = DBusMenu(
-            self.bus,
-            on_refresh=self.trigger_refresh,
-            on_quit=self.quit,
-            on_open_config=self.open_config
-        )
-        self.item = StatusNotifierItem(self.bus)
+
+        self.indicators = {}
+        target_provs = ["claude", "antigravity", "codex", "copilot"]
+
+        for pid in target_provs:
+            self.indicators[pid] = ProviderIndicator(
+                provider_id=pid,
+                icon_name=pid,
+                on_refresh=self.trigger_refresh,
+                on_quit=self.quit,
+                on_open_config=self.open_config
+            )
 
         self._register_with_watcher()
-        # Retry registration if watcher becomes available later
         GLib.timeout_add_seconds(3, self._check_watcher_registration)
 
         self._refreshing = False
-
-        # Load initial cached state
         self.load_cache()
-
-        # Initial background refresh
         self.trigger_refresh()
 
-        # Timer
         interval = int(self.cfg.get("update_interval_seconds", 120))
         GLib.timeout_add_seconds(interval, self._on_timer)
 
-        # Clean exit on signals
         for sig in (signal.SIGTERM, signal.SIGINT):
             GLib.unix_signal_add(GLib.PRIORITY_HIGH, sig, self._on_signal_exit, sig)
 
     def _register_with_watcher(self):
         try:
-            watcher = self.bus.get_object("org.kde.StatusNotifierWatcher", "/StatusNotifierWatcher")
-            watcher.RegisterStatusNotifierItem(BUS_NAME, dbus_interface="org.kde.StatusNotifierWatcher")
+            session_bus = dbus.SessionBus()
+            watcher = session_bus.get_object("org.kde.StatusNotifierWatcher", "/StatusNotifierWatcher")
+            for pid, ind in self.indicators.items():
+                watcher.RegisterStatusNotifierItem(ind.bus_name_str, dbus_interface="org.kde.StatusNotifierWatcher")
         except Exception:
             pass
 
@@ -418,38 +443,21 @@ class App:
         except Exception:
             pass
 
-    def build_topbar_label(self, data: dict) -> str:
-        parts = []
+    def update_data(self, data: dict):
         providers_raw = data.get("providers", {})
         fmt = self.cfg.get("topbar_format", "standard")
 
-        for pid, pdata in providers_raw.items():
+        for pid, ind in self.indicators.items():
+            ind.menu.update_menu(data)
+
+            pdata = providers_raw.get(pid)
+            if not pdata:
+                ind.item.set_label("")
+                continue
             p = deserialize_provider(pdata)
             if not p.ok:
+                ind.item.set_label("err")
                 continue
-
-            tag = "C" if pid == "claude" else ("AG" if pid == "antigravity" else ("CX" if pid == "codex" else ("GH" if pid == "copilot" else pid[:2].upper())))
-
-            # Determine icon/color for provider
-            min_pct = 100
-            has_window = False
-            for w in p.windows:
-                if w.remaining_pct is not None:
-                    has_window = True
-                    min_pct = min(min_pct, w.remaining_pct)
-
-            if has_window and min_pct <= 15:
-                icon = "🔴"
-            elif has_window and min_pct <= 40:
-                icon = "🟡"
-            else:
-                brand_icons = {
-                    "claude": "🟣",
-                    "antigravity": "🔵",
-                    "codex": "🟢",
-                    "copilot": "🐙"
-                }
-                icon = brand_icons.get(pid, p.icon or "🟢")
 
             w5 = p.get_5h_window()
             wW = p.get_weekly_window()
@@ -458,14 +466,14 @@ class App:
                 s5 = f"{w5.remaining_pct}%" if w5 and w5.remaining_pct is not None else "--"
                 sW = f"{wW.remaining_pct}%" if wW and wW.remaining_pct is not None else "--"
                 if w5 and wW:
-                    parts.append(f"{icon} {tag} {s5}·{sW}")
+                    ind.item.set_label(f"{s5}·{sW}")
                 elif wW:
-                    parts.append(f"{icon} {tag} {sW}")
+                    ind.item.set_label(f"{sW}")
                 elif w5:
-                    parts.append(f"{icon} {tag} {s5}")
+                    ind.item.set_label(f"{s5}")
                 elif p.windows:
                     first_pct = p.windows[0].remaining_pct
-                    parts.append(f"{icon} {tag} {first_pct}%" if first_pct is not None else f"{icon} {tag}")
+                    ind.item.set_label(f"{first_pct}%" if first_pct is not None else "ok")
             else:
                 sub_parts = []
                 if w5 and w5.remaining_pct is not None:
@@ -474,18 +482,11 @@ class App:
                     sub_parts.append(f"W {wW.remaining_pct}%")
 
                 if sub_parts:
-                    parts.append(f"{icon} {tag}: {' '.join(sub_parts)}")
+                    ind.item.set_label(" ".join(sub_parts))
                 elif p.windows and p.windows[0].remaining_pct is not None:
-                    parts.append(f"{icon} {tag}: {p.windows[0].remaining_pct}%")
-
-        if not parts:
-            return "AI Quota: active"
-        return "   •   ".join(parts)
-
-    def update_data(self, data: dict):
-        label = self.build_topbar_label(data)
-        self.item.set_label(label)
-        self.menu.update_menu(data)
+                    ind.item.set_label(f"{p.windows[0].remaining_pct}%")
+                else:
+                    ind.item.set_label("ok")
 
     def _on_timer(self):
         self.trigger_refresh()
@@ -495,10 +496,11 @@ class App:
         if self._refreshing:
             return
         self._refreshing = True
-        curr = self.item.label.replace(" ⟳", "")
-        self.item.set_label(f"{curr} ⟳")
 
-        # 15s safety timeout to ensure "⟳" is never stuck
+        for ind in self.indicators.values():
+            curr = ind.item.label.replace(" ⟳", "")
+            ind.item.set_label(f"{curr} ⟳")
+
         GLib.timeout_add_seconds(15, self._on_refresh_timeout)
 
         def worker():
@@ -515,8 +517,9 @@ class App:
     def _on_refresh_timeout(self):
         if self._refreshing:
             self._refreshing = False
-            curr = self.item.label.replace(" ⟳", "")
-            self.item.set_label(curr)
+            for ind in self.indicators.values():
+                curr = ind.item.label.replace(" ⟳", "")
+                ind.item.set_label(curr)
         return GLib.SOURCE_REMOVE
 
     def _on_refresh_done(self, res):
@@ -526,15 +529,14 @@ class App:
 
     def _on_refresh_failed(self):
         self._refreshing = False
-        curr = self.item.label.replace(" ⟳", "")
-        self.item.set_label(curr)
+        for ind in self.indicators.values():
+            curr = ind.item.label.replace(" ⟳", "")
+            ind.item.set_label(curr)
         return GLib.SOURCE_REMOVE
 
     def quit(self):
-        try:
-            self.item.NewStatus("Passive")
-        except Exception:
-            pass
+        for ind in self.indicators.values():
+            ind.item.quit()
         if os.path.exists(PID_FILE):
             try:
                 os.remove(PID_FILE)
